@@ -1,6 +1,3 @@
-all:
-	cp $(TARGET).prx E:/pspemu/seplugins/$(TARGET).prx
-
 TARGET = ge_patch
 OBJS = main.o gu.o exports.o
 
@@ -18,3 +15,10 @@ LIBS = -lpspsystemctrl_kernel
 
 PSPSDK = $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build_prx.mak
+
+all: $(TARGET).prx
+	@if [ -d E:/pspemu/seplugins ]; then \
+		cp $(TARGET).prx E:/pspemu/seplugins/$(TARGET).prx; \
+	else \
+		echo "Built $(TARGET).prx (skip copy: E:/pspemu/seplugins not found)"; \
+	fi
