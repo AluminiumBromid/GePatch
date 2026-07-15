@@ -328,6 +328,37 @@ static CompatProfile profile;
 #define DISPLAY_FB_TRACK_MAX 8
 static u32 display_fb_addrs[DISPLAY_FB_TRACK_MAX];
 static u32 display_fb_addr_count = 0;
+// Set to 1 the first time the game calls sceDisplaySetFrameBuf. Games that do
+// this are properly tracked and should only trigger the framebuffer copy there.
+// Games that never call it fall back to copying at GE list enqueue time.
+static u32 display_setframebuf_seen = 0;
+
+// Diagnostic log: record each unique (game_fb_addr, pitch, ignore) tuple once
+// so we get a compact picture of what framebuffers the game uses without
+// flooding the log file.
+#define DIAG_FB_MAX 32
+typedef struct { u32 addr; u32 pitch; u32 ignored; } DiagFbEntry;
+static DiagFbEntry diag_fb_seen[DIAG_FB_MAX];
+static u32 diag_fb_seen_count = 0;
+
+static int isDisplayFramebuf(u32 addr);
+
+static void diagLogFramebuf(u32 game_fb_addr, u32 pitch, u32 ignored) {
+  u32 i;
+  for (i = 0; i < diag_fb_seen_count; i++) {
+    if (diag_fb_seen[i].addr == game_fb_addr && diag_fb_seen[i].pitch == pitch)
+      return;
+  }
+  if (diag_fb_seen_count < DIAG_FB_MAX) {
+    diag_fb_seen[diag_fb_seen_count].addr = game_fb_addr;
+    diag_fb_seen[diag_fb_seen_count].pitch = pitch;
+    diag_fb_seen[diag_fb_seen_count].ignored = ignored;
+    diag_fb_seen_count++;
+    log("diag_fb: addr=%08lx pitch=%lu ignore=%lu display_tracked=%d\n",
+        (unsigned long)game_fb_addr, (unsigned long)pitch, (unsigned long)ignored,
+        isDisplayFramebuf(game_fb_addr));
+  }
+}
 
 static void trackDisplayFramebuf(u32 addr) {
   addr &= 0x0fffffff;
@@ -336,8 +367,11 @@ static void trackDisplayFramebuf(u32 addr) {
   for (i = 0; i < display_fb_addr_count; i++) {
     if (display_fb_addrs[i] == addr) return;
   }
-  if (display_fb_addr_count < DISPLAY_FB_TRACK_MAX)
+  if (display_fb_addr_count < DISPLAY_FB_TRACK_MAX) {
+    log("diag_display_fb: addr=%08lx (total tracked: %lu)\n",
+        (unsigned long)addr, (unsigned long)(display_fb_addr_count + 1));
     display_fb_addrs[display_fb_addr_count++] = addr;
+  }
 }
 
 static int isDisplayFramebuf(u32 addr) {
@@ -1105,6 +1139,8 @@ exit_loop:
             state.ignore_framebuf = 1;
           }
 
+          diagLogFramebuf(game_fb_addr, pitch, state.ignore_framebuf);
+
           TRACE_LOG("gepatch[%lu] fb=%08lx pitch=%lu ignore_fb=%lu\n",
                     (unsigned long)state.trace_list_id,
                     (unsigned long)state.framebuf,
@@ -1278,7 +1314,10 @@ int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
 }
 
 int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
-  if (state.has_draws)
+  // Only copy the framebuffer here for games that never call sceDisplaySetFrameBuf.
+  // Games that do call it (like MHP3) submit multiple GE lists per visual frame;
+  // copying between lists would capture a half-rendered frame causing 50/50 flicker.
+  if (state.has_draws && !display_setframebuf_seen)
     copyFrameBuffer();
   resetGeState();
   patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
@@ -1293,6 +1332,7 @@ int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeLi
 
 int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
   trackDisplayFramebuf((u32)topaddr);
+  display_setframebuf_seen = 1;
   copyFrameBuffer();
   return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
