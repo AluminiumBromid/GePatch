@@ -1069,7 +1069,9 @@ exit_loop:
           *list = (cmd << 24) | (VRAM_DRAW_BUFFER_OFFSET & 0xffffff);
           state.framebufptr = op;
         } else {
-          u16 pitch = (op & 0xffff) != 512 ? (op & 0xffff) : 960;
+          // Tentatively write pitch; may be corrected below once we have both ptr+width.
+          u32 raw_pitch = op & 0xffff;
+          u16 pitch = (raw_pitch == 480 || raw_pitch == 512) ? 960 : (u16)raw_pitch;
           *list = (cmd << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | pitch;
           state.framebufwidth = op;
           state.framebufwidth_addr = list;
@@ -1084,11 +1086,18 @@ exit_loop:
           u32 game_fb_highbyte = (state.framebufwidth >> 16) & 0x0f;
           u32 game_fb_addr = (game_fb_highbyte << 24) | (state.framebufptr & 0xffffff);
 
-          // This allows more games to work, but causes weird triangles in Sonic.
           u32 pitch = state.framebufwidth & 0xffff;
-          // Never ignore a framebuffer that the game has actually displayed — it
-          // is a real display surface regardless of its pitch value.
-          if (pitch == 512 || pitch == 960 || isDisplayFramebuf(game_fb_addr)) {
+
+          // Display framebuffers: standard PSP pitches (480 tight-pack, 512
+          // padded) and any buffer the game has shown via sceDisplaySetFrameBuf.
+          // All of these get pitch forced to 960 so they match the scaled vertices
+          // and the fixed-pitch copyFrameBuffer blit.
+          // Any other pitch is assumed to be a render-to-texture target: NOP all
+          // draws targeting it to avoid feedback loops.
+          if (pitch == 480 || pitch == 512 || pitch == 960 || isDisplayFramebuf(game_fb_addr)) {
+            // Force the FRAMEBUFWIDTH command to 960 so the buffer layout is
+            // consistent with the 960-wide vertex coordinates.
+            *state.framebufwidth_addr = (GE_CMD_FRAMEBUFWIDTH << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | 960;
             state.ignore_framebuf = 0;
           } else {
             state.trace_fb_ignored++;
@@ -1104,7 +1113,7 @@ exit_loop:
           TRACE_EXPORT("fb", state.trace_list_id, (u32)list, cmd, data,
                        state.framebuf, pitch, state.ignore_framebuf);
 
-          insertFramebuf(state.framebuf, pitch, state.ge_cmd[GE_CMD_FRAMEBUFPIXFORMAT], HEIGHT);
+          insertFramebuf(state.framebuf, 960, state.ge_cmd[GE_CMD_FRAMEBUFPIXFORMAT], HEIGHT);
 
           state.framebufptr = 0;
           state.framebufwidth = 0;
