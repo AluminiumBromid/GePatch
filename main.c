@@ -225,7 +225,7 @@ typedef struct {
 } GeState;
 
 static GeState state;
-
+static int display_setframebuf_seen = 0;
 void resetGeState() {
   memset(&state, 0, sizeof(GeState));
 }
@@ -624,7 +624,10 @@ exit_loop:
           *list = (cmd << 24) | (VRAM_DRAW_BUFFER_OFFSET & 0xffffff);
           state.framebufptr = op;
         } else {
-          u16 pitch = (op & 0xffff) != 512 ? (op & 0xffff) : 960;
+          // 480 is the tight-pack PSP display pitch (480px * 2bpp = 960 bytes/row),
+          // 512 is the padded variant. Both scale to 960 to match vertex coordinates.
+          u32 raw_pitch = op & 0xffff;
+          u16 pitch = (raw_pitch == 480 || raw_pitch == 512) ? 960 : (u16)raw_pitch;
           *list = (cmd << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | pitch;
           state.framebufwidth = op;
           state.framebufwidth_addr = list;
@@ -635,7 +638,8 @@ exit_loop:
 
           // This allows more games to work, but causes weird triangles in Sonic.
           u32 pitch = state.framebufwidth & 0xffff;
-          if (pitch == 512 || pitch == 960) {
+          if (pitch == 480 || pitch == 512 || pitch == 960) {
+            *state.framebufwidth_addr = (GE_CMD_FRAMEBUFWIDTH << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | 960;
             state.ignore_framebuf = 0;
           } else {
             *state.framebufwidth_addr = (GE_CMD_FRAMEBUFWIDTH << 24) | ((VRAM_1KB >> 24) << 16) | 0;
@@ -790,7 +794,10 @@ int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
 }
 
 int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
-  if (state.has_draws)
+  // Games that call sceDisplaySetFrameBuf once per visual frame (e.g. 3D games
+  // with multiple GE sub-passes) use that as the copy point. Copying here too
+  // would blit a half-rendered frame and cause flickering every other frame.
+  if (state.has_draws && !display_setframebuf_seen)
     copyFrameBuffer();
   resetGeState();
   patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
@@ -804,6 +811,7 @@ int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeLi
 }
 
 int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
+  display_setframebuf_seen = 1;
   copyFrameBuffer();
   return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -814,21 +822,21 @@ int module_start(SceSize args, void *argp) {
   if (pad.Buttons & PSP_CTRL_LTRIGGER)
     return 0;
 
-  _sceGeEdramGetAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
-  _sceGeEdramGetSize = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
-  _sceGeGetList = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
-  _sceGeListUpdateStallAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE0D68148);
-  _sceGeListEnQueue = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xAB49E76A);
-  _sceGeListEnQueueHead = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
+  _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
+  _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
+  _sceGeGetList = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
+  _sceGeListUpdateStallAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE0D68148);
+  _sceGeListEnQueue = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xAB49E76A);
+  _sceGeListEnQueueHead = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
 
-  sctrlHENPatchSyscall((u32)_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
-  sctrlHENPatchSyscall((u32)_sceGeEdramGetSize, sceGeEdramGetSizePatched);
-  sctrlHENPatchSyscall((u32)_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
-  sctrlHENPatchSyscall((u32)_sceGeListEnQueue, sceGeListEnQueuePatched);
-  sctrlHENPatchSyscall((u32)_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
+  sctrlHENPatchSyscall(_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
+  sctrlHENPatchSyscall(_sceGeEdramGetSize, sceGeEdramGetSizePatched);
+  sctrlHENPatchSyscall(_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
+  sctrlHENPatchSyscall(_sceGeListEnQueue, sceGeListEnQueuePatched);
+  sctrlHENPatchSyscall(_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
 
-  _sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
-  sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
+  _sceDisplaySetFrameBuf = (void *)sctrlHENFindFunction("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
+  sctrlHENPatchSyscall(_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 
   sceKernelDcacheWritebackInvalidateAll();
   sceKernelIcacheClearAll();
