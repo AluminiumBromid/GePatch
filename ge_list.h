@@ -74,6 +74,19 @@ extern u32 ge_list_commands, ge_list_vertices;
 // (normally 32-bit) into visible bands. Dithering breaks the bands up; the walker keeps it on and
 // keeps GePatch's dither pattern (the copy list sets both once per frame).
 extern int ge_list_dither;
+// XMB only (set at start-up): the game-boot video copies each frame (480x272, 32-bit) with a block
+// transfer to the fixed VRAM address 0x04000000, i.e. into GePatch's render buffer. When the walker
+// sees such a transfer it switches to pass-through: lists stay unpatched, so the XMB renders natively
+// into VRAM where the video lands, and the frame hook shows the native picture. ge_list_video_seen is
+// set for every video transfer (also while passing through); the frame hook ends the pass-through
+// when none came for a while.
+extern int ge_list_xmb;
+extern int ge_list_passthrough, ge_list_video_seen;
+// The XMB's GE state for the registers GePatch rewrites (patched = 0: the XMB's own values, for
+// pass-through; 1: GePatch's, for returning to 2x) as a list ending in FINISH/END; returns its words.
+u32 ge_list_xmb_state(u32 *out, int patched);
+// Where that list is built (GePatch's copy-list area, read by the GE every frame)
+#define XMB_STATE_LIST (RENDER_LIST + 0x2000)
 // Standard 4x4 pattern (PSPSDK sceGuSetDither example: {-4,0,-3,1}, {2,-2,3,-1}, {-3,1,-4,0},
 // {3,-1,2,-2}), one GE_CMD_DITH0..3 argument per row, 4-bit signed entries.
 #define GE_DITHER_ROW0 0x1D0C

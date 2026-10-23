@@ -231,6 +231,74 @@ static void stop_streaming(u32 *at, u32 cmd, u32 walked) {
   ge_list_progress = NULL;
 }
 
+int ge_list_xmb;
+int ge_list_video_seen;
+static u32 xmb_shadow[256];  // XMB: the last value of every command walked, across lists
+int ge_list_passthrough;
+
+// GePatch's value for a command it rewrites to the same thing every time (the walker's cases use it,
+// and the XMB state lists below).
+static u32 patched_value(u32 cmd, u32 data) {
+  union { float f; u32 i; } t;
+  switch (cmd) {
+    case GE_CMD_FRAMEBUFPIXFORMAT: return PIXELFORMAT;
+    case GE_CMD_ZBUFPTR: return VRAM_DEPTH_BUFFER_OFFSET & 0xffffff;
+    case GE_CMD_ZBUFWIDTH: return ((VRAM_DEPTH_BUFFER_OFFSET >> 24) << 16) | PITCH;
+    case GE_CMD_VIEWPORTXSCALE: t.f = ((data << 8) >> 31) ? -(WIDTH / 2) : (WIDTH / 2); return t.i >> 8;
+    case GE_CMD_VIEWPORTYSCALE: t.f = ((data << 8) >> 31) ? -(HEIGHT / 2) : (HEIGHT / 2); return t.i >> 8;
+    case GE_CMD_VIEWPORTXCENTER:
+    case GE_CMD_VIEWPORTYCENTER: t.f = 2048; return t.i >> 8;
+    case GE_CMD_OFFSETX: return (2048 - (WIDTH / 2)) << 4;
+    case GE_CMD_OFFSETY: return (2048 - (HEIGHT / 2)) << 4;
+    case GE_CMD_REGION2:
+    case GE_CMD_SCISSOR2: return ((HEIGHT - 1) << 10) | (WIDTH - 1);
+  }
+  return data;
+}
+
+// Registers GePatch rewrites that stay in the GE until set again (the framebuffer address and
+// width come with every frame's list). When the XMB passes through, the GE must get the XMB's own
+// values back; when it returns to 2x, GePatch's.
+static const u8 xmb_state_regs[] = {
+  GE_CMD_FRAMEBUFPIXFORMAT, GE_CMD_VIEWPORTXSCALE, GE_CMD_VIEWPORTYSCALE, GE_CMD_VIEWPORTXCENTER,
+  GE_CMD_VIEWPORTYCENTER, GE_CMD_OFFSETX, GE_CMD_OFFSETY, GE_CMD_REGION2, GE_CMD_SCISSOR2,
+  GE_CMD_ZBUFPTR, GE_CMD_ZBUFWIDTH,
+};
+static u8 xmb_seen[256];  // the XMB has sent this command (xmb_shadow holds its value)
+
+u32 ge_list_xmb_state(u32 *out, int patched) {
+  u32 n = 0, i;
+  for (i = 0; i < sizeof(xmb_state_regs); i++) {
+    const u32 cmd = xmb_state_regs[i];
+    if (xmb_seen[cmd])
+      out[n++] = (cmd << 24) | (patched ? patched_value(cmd, xmb_shadow[cmd]) : xmb_shadow[cmd]);
+  }
+  out[n++] = (u32)GE_CMD_FINISH << 24;
+  out[n++] = (u32)GE_CMD_END << 24;
+  return n;
+}
+
+// A 32-bit block transfer into GePatch's render buffer (the transfer registers from xmb_shadow).
+static int is_video_transfer(u32 op) {
+  const u32 *s = xmb_shadow;
+  const u32 dst = ((s[GE_CMD_TRANSFERSRC + 3] & 0x0f0000) << 8) | (s[GE_CMD_TRANSFERSRC + 2] & 0xffffff);
+  return (op & 1) && dst >= VRAM_DRAW_BUFFER_OFFSET && dst < VRAM_DEPTH_BUFFER_OFFSET;
+}
+
+// While passing through: no patching, only look for the video's transfers (they keep it on).
+static void scan_passthrough(u32 *list, u32 *stall) {
+  u32 n = 0;
+  for (; list && list != stall && n < 0x40000; list++, n++) {
+    const u32 op = *list, cmd = op >> 24;
+    xmb_shadow[cmd] = op & 0xffffff;
+    xmb_seen[cmd] = 1;
+    if (cmd == GE_CMD_TRANSFERSTART && is_video_transfer(op))
+      ge_list_video_seen = 1;
+    if (cmd == GE_CMD_END && list[-1] >> 24 == GE_CMD_FINISH)
+      break;
+  }
+}
+
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
@@ -239,6 +307,11 @@ void patchGeList(u32 *list, u32 *stall) {
 
   StackEntry *stack_entry;
   StackEntry stack_entry_buf;
+
+  if (ge_list_passthrough) {
+    scan_passthrough(list, stall);
+    return;
+  }
 
   u32 walked = 0;
   u32 next_progress = ge_list_progress_every;
@@ -253,6 +326,16 @@ void patchGeList(u32 *list, u32 *stall) {
 
     u32 op = *list;
     u32 cmd = op >> 24;
+    if (ge_list_xmb) {
+      xmb_shadow[cmd] = op & 0xffffff;
+      xmb_seen[cmd] = 1;
+      if (cmd == GE_CMD_TRANSFERSTART && is_video_transfer(op)) {
+        // The boot video: hand over to native rendering for the rest of this list and onwards
+        ge_list_video_seen = 1;
+        ge_list_passthrough = 1;
+        goto finish;
+      }
+    }
     const u8 kind = cmd_kind[cmd];
     if (kind == CMD_SKIP)
       continue;
@@ -591,7 +674,7 @@ exit_loop:
         // break;
 
       case GE_CMD_FRAMEBUFPIXFORMAT:
-        *list = (cmd << 24) | PIXELFORMAT;
+        *list = (cmd << 24) | patched_value(cmd, data);
         break;
 
       case GE_CMD_FRAMEBUFPTR:
@@ -633,11 +716,8 @@ exit_loop:
       }
 
       case GE_CMD_ZBUFPTR:
-        *list = (cmd << 24) | (VRAM_DEPTH_BUFFER_OFFSET & 0xffffff);
-        break;
-
       case GE_CMD_ZBUFWIDTH:
-        *list = (cmd << 24) | ((VRAM_DEPTH_BUFFER_OFFSET >> 24) << 16) | PITCH;
+        *list = (cmd << 24) | patched_value(cmd, data);
         break;
 
       case GE_CMD_TEXADDR0:
@@ -682,31 +762,12 @@ exit_loop:
       }
 
       case GE_CMD_VIEWPORTXSCALE:
-        t.f = ((data << 8) >> 31) ? -(WIDTH / 2) : (WIDTH / 2);
-        *list = (cmd << 24) | (t.i >> 8);
-        break;
-
       case GE_CMD_VIEWPORTYSCALE:
-        t.f = ((data << 8) >> 31) ? -(HEIGHT / 2) : (HEIGHT / 2);
-        *list = (cmd << 24) | (t.i >> 8);
-        break;
-
       case GE_CMD_VIEWPORTXCENTER:
-        t.f = 2048;
-        *list = (cmd << 24) | (t.i >> 8);
-        break;
-
       case GE_CMD_VIEWPORTYCENTER:
-        t.f = 2048;
-        *list = (cmd << 24) | (t.i >> 8);
-        break;
-
       case GE_CMD_OFFSETX:
-        *list = (cmd << 24) | ((2048 - (WIDTH / 2)) << 4);
-        break;
-
       case GE_CMD_OFFSETY:
-        *list = (cmd << 24) | ((2048 - (HEIGHT / 2)) << 4);
+        *list = (cmd << 24) | patched_value(cmd, data);
         break;
 
       case GE_CMD_DITHERENABLE:
@@ -724,7 +785,7 @@ exit_loop:
 
       case GE_CMD_REGION2:
       case GE_CMD_SCISSOR2:
-        *list = (cmd << 24) | ((HEIGHT - 1) << 10) | (WIDTH - 1);
+        *list = (cmd << 24) | patched_value(cmd, data);
         break;
 
       default:

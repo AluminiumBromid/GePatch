@@ -167,8 +167,48 @@ int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeLi
   return _sceGeListEnQueueHead(list, stall, cbid, arg);
 }
 
+// XMB boot video: frames since the last video transfer while passing through
+#define PASSTHROUGH_QUIET_FRAMES 60
+static u32 passthrough_quiet;
+static int passthrough_state_sent;  // the GE has the state for this pass-through setting
+
 int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
   display_setframebuf_seen = 1;
+
+  // A frame the GE did not draw: the game displays a buffer in main RAM outside the fake VRAM
+  // (MHP3rd's intro video shows its decoded frames this way, 32-bit). Show it as it is, natively;
+  // decided per frame, so the next GE frame is 2x again (the lists stay patched meanwhile).
+  // Adrenaline hands the screen back to the PSP emulator when DRAW_NATIVE drops.
+  const u32 shown = (u32)topaddr & 0x0fffffff;
+  if (shown >= 0x08800000 && shown < FAKE_VRAM) {
+    *(u32 *)DRAW_NATIVE = 0;
+    return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
+  }
+
+  // XMB boot video (see ge_list_xmb): end the pass-through when no video transfer came for a while
+  if (ge_list_passthrough) {
+    if (ge_list_video_seen)
+      passthrough_quiet = 0;
+    else if (++passthrough_quiet > PASSTHROUGH_QUIET_FRAMES)
+      ge_list_passthrough = 0;  // back to 2x from the next frame
+  }
+  ge_list_video_seen = 0;
+  // Entering or leaving pass-through: set the GE registers GePatch rewrites (they stay in the GE
+  // until set again) to the XMB's own values, or back to GePatch's. Runs before the next frame.
+  if (ge_list_passthrough != passthrough_state_sent) {
+    ge_list_xmb_state((u32 *)(XMB_STATE_LIST | 0xA0000000), !ge_list_passthrough);
+    _sceGeListEnQueue((void *)XMB_STATE_LIST, NULL, -1, NULL);
+    passthrough_state_sent = ge_list_passthrough;
+  }
+  if (ge_list_passthrough) {
+    // Native picture: the XMB renders unpatched into VRAM, where the video is copied too. Show
+    // that (Adrenaline copies the PSP frame from VRAM; for the PSP emulator's own display, point it there).
+    *(u32 *)DRAW_NATIVE = 0;
+    if (((u32)topaddr & 0x0fe00000) == FAKE_VRAM)
+      topaddr = (void *)(0x44000000 | ((u32)topaddr & 0x001fffff));
+    return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
+  }
+
   copyFrameBuffer();
   return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -182,6 +222,7 @@ int module_start(SceSize args, void *argp) {
   // The XMB (same check as Adrenaline's plugin loader). Starting a game reboots the PSP side and
   // loads GePatch again for the game, so this never carries over into a game.
   ge_list_dither = sceKernelInitApitype() >= PSP_INIT_APITYPE_VSH_KERNEL;
+  ge_list_xmb = ge_list_dither;
 
   _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
