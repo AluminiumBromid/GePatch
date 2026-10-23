@@ -209,7 +209,11 @@ static const u8 cmd_kind[256] = {
   [GE_CMD_VIEWPORTXCENTER] = CMD_HANDLE, [GE_CMD_VIEWPORTYCENTER] = CMD_HANDLE,
   [GE_CMD_OFFSETX] = CMD_HANDLE, [GE_CMD_OFFSETY] = CMD_HANDLE,
   [GE_CMD_REGION2] = CMD_HANDLE, [GE_CMD_SCISSOR2] = CMD_HANDLE,
+  [GE_CMD_DITHERENABLE] = CMD_HANDLE, [GE_CMD_DITH0 ... GE_CMD_DITH3] = CMD_HANDLE,  // XMB dithering
 };
+
+int ge_list_dither;
+static const u32 dither_rows[4] = { GE_DITHER_ROW0, GE_DITHER_ROW1, GE_DITHER_ROW2, GE_DITHER_ROW3 };
 
 void (*ge_list_progress)(u32 *safe);
 u32 ge_list_progress_every;
@@ -703,6 +707,19 @@ exit_loop:
 
       case GE_CMD_OFFSETY:
         *list = (cmd << 24) | ((2048 - (HEIGHT / 2)) << 4);
+        break;
+
+      case GE_CMD_DITHERENABLE:
+        if (ge_list_dither)
+          *list = (cmd << 24) | 1;
+        break;
+
+      case GE_CMD_DITH0:
+      case GE_CMD_DITH1:
+      case GE_CMD_DITH2:
+      case GE_CMD_DITH3:
+        if (ge_list_dither)
+          *list = (cmd << 24) | dither_rows[cmd - GE_CMD_DITH0];
         break;
 
       case GE_CMD_REGION2:

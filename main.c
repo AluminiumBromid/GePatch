@@ -3,6 +3,7 @@
 #include <pspctrl.h>
 #include <pspge.h>
 #include <pspgu.h>
+#include <pspinit.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,8 @@
 #include <systemctrl.h>
 
 #include "ge_list.h"
+
+void sendCommandi(int cmd, int argument);  // gu.c
 
 PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 
@@ -84,6 +87,14 @@ void copyFrameBuffer() {
   // One 32-bit pixel: the frame number, after the picture.
   sceGuCopyImage(GE_FORMAT_8888, 0, 0, 1, 1, 8, (void *)NATIVE_FRAME_SOURCE,
                  0, 0, 8, (void *)NATIVE_FRAME_COUNTER);
+  if (ge_list_dither) {
+    // For the next frame (the walker keeps the XMB from changing it)
+    sendCommandi(GE_CMD_DITH0, GE_DITHER_ROW0);
+    sendCommandi(GE_CMD_DITH1, GE_DITHER_ROW1);
+    sendCommandi(GE_CMD_DITH2, GE_DITHER_ROW2);
+    sendCommandi(GE_CMD_DITH3, GE_DITHER_ROW3);
+    sendCommandi(GE_CMD_DITHERENABLE, 1);
+  }
   sceGuFinish();
   _sceGeListEnQueue((void *)RENDER_LIST, NULL, -1, NULL);
 }
@@ -167,6 +178,10 @@ int module_start(SceSize args, void *argp) {
   sceCtrlPeekBufferPositive(&pad, 1);
   if (pad.Buttons & PSP_CTRL_LTRIGGER)
     return 0;
+
+  // The XMB (same check as Adrenaline's plugin loader). Starting a game reboots the PSP side and
+  // loads GePatch again for the game, so this never carries over into a game.
+  ge_list_dither = sceKernelInitApitype() >= PSP_INIT_APITYPE_VSH_KERNEL;
 
   _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);

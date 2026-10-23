@@ -70,6 +70,17 @@ extern GeState state;
 // Totals of all walks: commands walked and through-mode vertices patched (tests/list_bench).
 extern u32 ge_list_commands, ge_list_vertices;
 
+// XMB only (set at start-up): GePatch renders 16-bit 565 colour, which turns the XMB's gradients
+// (normally 32-bit) into visible bands. Dithering breaks the bands up; the walker keeps it on and
+// keeps GePatch's dither pattern (the copy list sets both once per frame).
+extern int ge_list_dither;
+// Standard 4x4 pattern (PSPSDK sceGuSetDither example: {-4,0,-3,1}, {2,-2,3,-1}, {-3,1,-4,0},
+// {3,-1,2,-2}), one GE_CMD_DITH0..3 argument per row, 4-bit signed entries.
+#define GE_DITHER_ROW0 0x1D0C
+#define GE_DITHER_ROW1 0xF3E2
+#define GE_DITHER_ROW2 0x0C1D
+#define GE_DITHER_ROW3 0xE2F3
+
 void resetGeState(void);
 void patchGeList(u32 *list, u32 *stall);
 
