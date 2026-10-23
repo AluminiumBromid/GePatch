@@ -51,6 +51,18 @@ static double now_ms(void) {
 static ListEntry *lists;
 static u32 num_lists;
 
+// --stream: the safe points patchGeList reports, per list (checked: inside the list's walk, rising).
+static int stream;
+static u32 safe_count[16], safe_last[16], safe_backwards, cur_list;
+static u32 *safe_first[16];
+static void record_safe(u32 *safe) {
+  const u32 a = (u32)(uintptr_t)safe;
+  if (safe_count[cur_list] && a <= safe_last[cur_list]) safe_backwards++;
+  if (!safe_count[cur_list]) safe_first[cur_list] = safe;
+  safe_count[cur_list]++;
+  safe_last[cur_list] = a;
+  if (ge_list_progress_every < 4096) ge_list_progress_every *= 2;  // the hook's schedule
+}
 
 // One frame: every list as the hooks see it (both reset the state at enqueue).
 static void patch_frame(void) {
@@ -59,7 +71,15 @@ static void patch_frame(void) {
     u32 *list = (u32 *)(uintptr_t)(e->list & 0x0fffffff);
     u32 *stall = (u32 *)(uintptr_t)(e->stall_enq & 0x0fffffff);
     resetGeState();
+    cur_list = i < 16 ? i : 15;
+    if (stream && !e->stall_enq) {
+      ge_list_progress = record_safe;
+      ge_list_progress_every = 128;
+    }
+    const u32 before = ge_list_commands;
     patchGeList(list, stall);
+    if (stream && getenv("LIST_SIZES")) printf("list %u: %u commands walked, streaming %s at the end; stopped at %08x by %03x after %u commands\n", i, ge_list_commands - before, ge_list_progress ? "still on" : "off", (u32)(uintptr_t)ge_list_stream_stop, ge_list_stream_stop_cmd, ge_list_stream_stop_walked);
+    ge_list_progress = NULL;
     if (e->stall_enq && e->stall_final != e->stall_enq)
       patchGeList(stall, (u32 *)(uintptr_t)(e->stall_final & 0x0fffffff));
   }
@@ -166,6 +186,7 @@ int main(int argc, char **argv) {
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--iters") && i + 1 < argc) iters = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+    else if (!strcmp(argv[i], "--stream")) stream = 1;
   }
 
   size_t cap_size, ram_size, vram_size;
@@ -189,14 +210,18 @@ int main(int argc, char **argv) {
 
   // The game builds new lists every frame: each pass starts from the captured (unpatched) RAM.
   double total = 0, best = 1e9;
+  u32 commands = 0, vertices = 0;
   for (int it = 0; it < iters; it++) {
     memcpy(ram, ram_img, ram_size);
     memcpy(vram, vram_img, vram_size);
+    ge_list_commands = ge_list_vertices = 0;
     const double t0 = now_ms();
     patch_frame();
     const double t = now_ms() - t0;
     total += t;
     if (t < best) best = t;
+    commands = ge_list_commands;
+    vertices = ge_list_vertices;
     if (it == 0 && out) {
       FILE *f = fopen(out, "wb");
       fwrite(ram, 1, ram_size, f);
@@ -204,7 +229,13 @@ int main(int argc, char **argv) {
       fclose(f);
     }
   }
-  printf("patch: %.3f ms/frame (best %.3f, %d passes)\n", total / iters, best, iters);
+  if (stream) {
+    for (u32 i = 0; i < num_lists && i < 16; i++)
+      printf("list %u (%08x, stall %08x): %u safe points per pass, first %08x, last %08x, end %s\n", i, lists[i].list,
+             lists[i].stall_enq, safe_count[i] / iters, (u32)(uintptr_t)safe_first[i], safe_last[i], "-");
+    printf("safe points going backwards: %u\n", safe_backwards);
+  }
+  printf("patch: %.3f ms/frame (best %.3f, %d passes), %u cmds, %u verts\n", total / iters, best, iters, commands, vertices);
 
   u32 order[256], sum = 0;
   for (int c = 0; c < 256; c++) { order[c] = c; sum += hist[c]; }

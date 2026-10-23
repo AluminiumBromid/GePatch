@@ -69,14 +69,21 @@ unsigned int sceGeEdramGetSizePatched(void) {
   return 4 * 1024 * 1024;
 }
 
+static u32 native_frame;
+
 void copyFrameBuffer() {
   *(u32 *)DRAW_NATIVE = 1;
+  // Uncached, so the GE reads the new value.
+  *(volatile u32 *)(NATIVE_FRAME_SOURCE | 0xA0000000) = ++native_frame;
 
   // memcpy((void *)DISPLAY_BUFFER, (void *)VRAM_DRAW_BUFFER_OFFSET, 960*544*2);
   sceGuStart(0, (void *)(RENDER_LIST | 0xA0000000));
   sceGuCopyImage(PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH,
                  (void *)VRAM_DRAW_BUFFER_OFFSET,
                  0, 0, PITCH, (void *)DISPLAY_BUFFER);
+  // One 32-bit pixel: the frame number, after the picture.
+  sceGuCopyImage(GE_FORMAT_8888, 0, 0, 1, 1, 8, (void *)NATIVE_FRAME_SOURCE,
+                 0, 0, 8, (void *)NATIVE_FRAME_COUNTER);
   sceGuFinish();
   _sceGeListEnQueue((void *)RENDER_LIST, NULL, -1, NULL);
 }
@@ -99,12 +106,45 @@ int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
   return _sceGeListUpdateStallAddr(qid, stall);
 }
 
+// Streaming: a complete list (no stall address from the game) is enqueued stalled at its start and
+// released piece by piece while the walk patches it, so the GE starts rendering during the walk
+// instead of after it. The stall only moves to positions before which everything is patched.
+// The first release comes early, so the GE starts almost at once; the interval then doubles, as the GE
+// (~2.5 commands per us in MHP3rd) falls behind the walk (~8 per us) and needs fewer releases.
+#define STREAM_FIRST 128
+#define STREAM_MAX 4096
+static int stream_qid;
+static u32 stream_hi;  // the game's address bits above 0x0fffffff (cached/uncached view)
+
+static void stream_progress(u32 *safe) {
+  sceKernelDcacheWritebackAll();
+  _sceGeListUpdateStallAddr(stream_qid, (void *)((u32)safe | stream_hi));
+  if (ge_list_progress_every < STREAM_MAX)
+    ge_list_progress_every *= 2;
+}
+
 int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
   // Games that call sceDisplaySetFrameBuf once per visual frame (e.g. 3D games
   // with multiple GE sub-passes) use that as the copy point. Copying here too
   // would blit a half-rendered frame and cause flickering every other frame.
   if (state.has_draws && !display_setframebuf_seen)
     copyFrameBuffer();
+  if (!stall) {
+    const int qid = _sceGeListEnQueue(list, (void *)list, cbid, arg);
+    if (qid >= 0) {
+      stream_qid = qid;
+      stream_hi = (u32)list & 0xf0000000;
+      ge_list_progress = stream_progress;
+      ge_list_progress_every = STREAM_FIRST;
+      resetGeState();
+      patchGeList((u32 *)((u32)list & 0x0fffffff), NULL);
+      ge_list_progress = NULL;
+      // Release the rest: past the END that finished the walk, or no stall at all.
+      _sceGeListUpdateStallAddr(qid, ge_list_end ? (void *)((u32)(ge_list_end + 1) | stream_hi) : NULL);
+      return qid;
+    }
+    // Enqueue refused: patch first as usual and let the original call report the error.
+  }
   resetGeState();
   patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
   return _sceGeListEnQueue(list, stall, cbid, arg);

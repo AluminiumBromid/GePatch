@@ -15,3 +15,6 @@ LIBS = -lpspsystemctrl_kernel
 
 PSPSDK = $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build_prx.mak
+
+# The list walker runs over every GE command of every frame: optimise it for speed, not size.
+ge_list.o: CFLAGS += -O2

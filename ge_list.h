@@ -7,6 +7,13 @@
 #include "ge_constants.h"
 
 #define DRAW_NATIVE 0xABCDEF00
+// Number of the last native frame in DISPLAY_BUFFER, for Adrenaline's display loop (redraws only
+// new frames). Written by the GE after the copy, so it changes only once the picture is complete.
+// Both ends of that transfer lie where the GE already works every frame: right after the picture,
+// and in the copy list's area (Sony's emulator stops with C1-2858-3 on a transfer from GePatch's
+// kernel memory to 0x0BCDEF10).
+#define NATIVE_FRAME_COUNTER (DISPLAY_BUFFER + PITCH * HEIGHT * 2)
+#define NATIVE_FRAME_SOURCE (RENDER_LIST + 0x1000)
 
 #define PITCH 960
 #define WIDTH 960
@@ -58,11 +65,26 @@ typedef struct {
   u32 framebuf_count;
 } GeState;
 
-
 extern GeState state;
+
+// Totals of all walks: commands walked and through-mode vertices patched (tests/list_bench).
+extern u32 ge_list_commands, ge_list_vertices;
 
 void resetGeState(void);
 void patchGeList(u32 *list, u32 *stall);
+
+// Streaming: while ge_list_progress is set, patchGeList calls it after ge_list_progress_every walked
+// commands (the callback may change the interval for the next call) with a position in the main list before which everything the GE will execute is patched
+// (only between top-level commands). Control flow the walk cannot follow exactly as the GE does
+// (BJUMP, signals) clears it for the rest of the walk.
+extern void (*ge_list_progress)(u32 *safe);
+extern u32 ge_list_progress_every;
+// After patchGeList: the list's END command if the walk ended at FINISH/END, else NULL.
+extern u32 *ge_list_end;
+// Where streaming stopped (the command), and the command type that stopped it; NULL/0 if it did not.
+extern u32 *ge_list_stream_stop;
+extern u32 ge_list_stream_stop_cmd;
+extern u32 ge_list_stream_stop_walked;  // commands walked before the stop
 
 // Writes the patched list back to memory for the GE (PSP: whole data cache; tests: nothing).
 void ge_list_flush_cache(void);

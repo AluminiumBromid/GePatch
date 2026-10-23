@@ -133,7 +133,6 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
 }
 
 GeState state;
-
 void resetGeState() {
   memset(&state, 0, sizeof(GeState));
 }
@@ -189,6 +188,45 @@ void AdvanceVerts(int count, int vertex_size) {
 }
 
 // TODO: when ignore_framebuf=1 or ignore_texture=1, dummy all non-control-flow instructions
+u32 ge_list_commands, ge_list_vertices;
+
+// What the walker does with each command. Most commands (matrix data, material colours, ...) need
+// nothing, and draws only in through mode or when they are dropped: the loop skips those first.
+enum { CMD_SKIP, CMD_HANDLE, CMD_DRAW };
+static const u8 cmd_kind[256] = {
+  [GE_CMD_BASE] = CMD_HANDLE, [GE_CMD_OFFSETADDR] = CMD_HANDLE, [GE_CMD_ORIGIN] = CMD_HANDLE,
+  [GE_CMD_CALL] = CMD_HANDLE, [GE_CMD_BJUMP] = CMD_HANDLE, [GE_CMD_JUMP] = CMD_HANDLE,
+  [GE_CMD_RET] = CMD_HANDLE, [GE_CMD_END] = CMD_HANDLE,
+  [GE_CMD_IADDR] = CMD_HANDLE, [GE_CMD_VADDR] = CMD_HANDLE, [GE_CMD_VERTEXTYPE] = CMD_HANDLE,
+  [GE_CMD_BEZIER] = CMD_DRAW, [GE_CMD_SPLINE] = CMD_DRAW, [GE_CMD_PRIM] = CMD_DRAW,
+  [GE_CMD_BOUNDINGBOX] = CMD_HANDLE,
+  [GE_CMD_TEXTUREMAPENABLE] = CMD_HANDLE,  // read by the draws (state.ge_cmd)
+  [GE_CMD_FRAMEBUFPIXFORMAT] = CMD_HANDLE, [GE_CMD_FRAMEBUFPTR] = CMD_HANDLE, [GE_CMD_FRAMEBUFWIDTH] = CMD_HANDLE,
+  [GE_CMD_ZBUFPTR] = CMD_HANDLE, [GE_CMD_ZBUFWIDTH] = CMD_HANDLE,
+  [GE_CMD_TEXADDR0 ... GE_CMD_TEXADDR7] = CMD_HANDLE,
+  [GE_CMD_TEXBUFWIDTH0 ... GE_CMD_TEXBUFWIDTH7] = CMD_HANDLE,
+  [GE_CMD_VIEWPORTXSCALE] = CMD_HANDLE, [GE_CMD_VIEWPORTYSCALE] = CMD_HANDLE,
+  [GE_CMD_VIEWPORTXCENTER] = CMD_HANDLE, [GE_CMD_VIEWPORTYCENTER] = CMD_HANDLE,
+  [GE_CMD_OFFSETX] = CMD_HANDLE, [GE_CMD_OFFSETY] = CMD_HANDLE,
+  [GE_CMD_REGION2] = CMD_HANDLE, [GE_CMD_SCISSOR2] = CMD_HANDLE,
+};
+
+void (*ge_list_progress)(u32 *safe);
+u32 ge_list_progress_every;
+u32 *ge_list_end;
+u32 *ge_list_stream_stop;
+u32 ge_list_stream_stop_cmd;
+u32 ge_list_stream_stop_walked;
+
+static void stop_streaming(u32 *at, u32 cmd, u32 walked) {
+  if (ge_list_progress) {
+    ge_list_stream_stop = at;
+    ge_list_stream_stop_cmd = cmd;
+    ge_list_stream_stop_walked = walked;
+  }
+  ge_list_progress = NULL;
+}
+
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
@@ -198,12 +236,32 @@ void patchGeList(u32 *list, u32 *stall) {
   StackEntry *stack_entry;
   StackEntry stack_entry_buf;
 
+  u32 walked = 0;
+  u32 next_progress = ge_list_progress_every;
+  ge_list_end = NULL;
+  ge_list_stream_stop = NULL;
+  ge_list_stream_stop_cmd = 0;
+
   for (; list && (!stall || (stall && list != stall)); list++) {
+    walked++;
     // if (checkAddress((u32)list) < 0)
       // goto finish;
 
     u32 op = *list;
     u32 cmd = op >> 24;
+    const u8 kind = cmd_kind[cmd];
+    if (kind == CMD_SKIP)
+      continue;
+    if (kind == CMD_DRAW) {
+      state.has_draws = 1;
+      if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) != GE_VTYPE_THROUGH && !state.ignore_framebuf &&
+          !(state.ignore_texture && state.ge_cmd[GE_CMD_TEXTUREMAPENABLE]))
+        continue;
+    }
+    if (ge_list_progress && walked >= next_progress && state.curr_stack == 0) {
+      ge_list_progress(list);  // may change ge_list_progress_every
+      next_progress = walked + ge_list_progress_every;
+    }
     u32 data = op & 0xffffff;
 
     state.ge_cmd[cmd] = data;
@@ -268,6 +326,8 @@ void patchGeList(u32 *list, u32 *stall) {
 
       // TODO: is it okay to always take the branch?
       case GE_CMD_BJUMP:
+        // The GE may not take it: stop streaming.
+        stop_streaming(list, cmd, walked);
         state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
         list = (u32 *)(state.address - 4);
         break;
@@ -278,7 +338,9 @@ void patchGeList(u32 *list, u32 *stall) {
         break;
 
       case GE_CMD_RET:
-        // Ignore returns when the stack is empty
+        // Ignore returns when the stack is empty. The GE continues there too (MHP3rd's main list
+        // runs into inline bone-matrix blocks ending in RET and draws everything after them), so
+        // streaming continues.
         stack_entry = pop();
         if (stack_entry) {
           list = stack_entry->list;
@@ -292,6 +354,7 @@ void patchGeList(u32 *list, u32 *stall) {
         switch (prev >> 24) {
           case GE_CMD_SIGNAL:
           {
+            stop_streaming(list, ((prev >> 16) & 0xff) | 0x100, walked);  // 0x1xx: signal behaviour
             u8 behaviour = (prev >> 16) & 0xff;
             u16 signal = prev & 0xffff;
             u16 enddata = data & 0xffff;
@@ -334,6 +397,7 @@ void patchGeList(u32 *list, u32 *stall) {
           }
 
           case GE_CMD_FINISH:
+            ge_list_end = list;
             goto finish;
 
           default:
@@ -430,6 +494,7 @@ void patchGeList(u32 *list, u32 *stall) {
           u32 vertex_addr = state.vertex_addr + lower * vertex_size;
           int i;
           for (i = lower; i < upper; i++, vertex_addr += vertex_size) {
+            ge_list_vertices++;
             int j;
             for (j = 0; j < 2; j++) {
               u32 addr = vertex_addr + pos_off + j * pos_size;
@@ -651,5 +716,6 @@ exit_loop:
   }
 
 finish:
+  ge_list_commands += walked;
   ge_list_flush_cache();
 }
