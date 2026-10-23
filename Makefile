@@ -1,5 +1,5 @@
 TARGET = ge_patch
-OBJS = main.o gu.o exports.o
+OBJS = main.o ge_list.o gu.o exports.o
 
 CFLAGS = -O3 -Os -G0 -Wall -fshort-wchar -fno-pic -mno-check-zero-division
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti

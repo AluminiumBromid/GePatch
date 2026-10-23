@@ -2,3 +2,4 @@
 *.elf
 *.prx
 exports.c
+tests/build/
