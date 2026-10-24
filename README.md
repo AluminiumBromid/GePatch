@@ -1,3 +1,47 @@
+# GePatch Unofficial
+
+**This is an unofficial fork of [GePatch](https://github.com/TheOfficialFloW/GePatch) by TheFlow. It is not
+made, endorsed or supported by TheFlow; please don't report its problems to the original project.**
+
+GePatch Unofficial is based on GePatch v0.2 and modified by AluminiumBromid (2026-07 to 2026-10). The
+plugin file is `ge_patch_unofficial.prx`. Each PRX carries its version and the commit it was built from:
+
+```bash
+strings ge_patch_unofficial.prx | grep "GePatch Unofficial"
+```
+
+## Changes from GePatch v0.2 (v0.2-unofficial.1)
+
+- Framebuffer pitch and copy timing fixed for 3D games (no more flicker in Monster Hunter Portable 3rd).
+- Faster GE list walk; lists are streamed to the GE while they are patched.
+- A frame counter for Adrenaline: it redraws only when a new native frame is complete.
+- XMB: the 16-bit render is dithered to break up colour bands.
+- Videos are shown natively: the XMB boot video is passed through, and frames the game displays from
+  main RAM (e.g. MHP3rd's intro video) are shown at their own resolution.
+
+Needs an Adrenaline build with the native frame counter (AluminiumBromid/Adrenaline commit 845306e).
+
+## Installation
+
+Copy `ge_patch_unofficial.prx` to `ux0:pspemu/seplugins/` and add it to `ux0:pspemu/seplugins/plugins.txt`
+(the `vsh` line is for the XMB):
+
+```
+game, ms0:/seplugins/ge_patch_unofficial.prx, on
+vsh, ms0:/seplugins/ge_patch_unofficial.prx, on
+```
+
+Remove the original `ge_patch.prx` line: both would patch the same functions. Hold L while starting a
+game to start it without GePatch Unofficial.
+
+## License
+
+GPLv2 like the original (LICENSE.TXT). The changes are listed above and in the git history.
+
+---
+
+The original README of GePatch v0.2 follows.
+
 # GE Patch Plugin
 
 This is an experimental plugin for [Adrenaline](https://github.com/TheOfficialFloW/Adrenaline) that allows you to play a few games in native resolution.

@@ -14,7 +14,7 @@
 
 void sendCommandi(int cmd, int argument);  // gu.c
 
-PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
+PSP_MODULE_INFO("GePatchUnofficial", 0x1007, 1, 0);
 
 #define log(...) \
 { \
@@ -26,7 +26,7 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 void logmsg(char *msg) {
   int k1 = pspSdkSetK1(0);
 
-  SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
+  SceUID fd = sceIoOpen("ms0:/ge_patch_unofficial.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
   if (fd >= 0) {
     sceIoLseek(fd, 0, PSP_SEEK_END);
     sceIoWrite(fd, msg, strlen(msg));
